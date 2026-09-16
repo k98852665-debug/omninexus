@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="مساحة OmniNexus للمحادثة التجريبية واستكشاف ملفات المشروع.">
+  <meta name="theme-color" content="#111217"><title>OmniNexus — مساحة العمل</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml"><link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="OmniNexus الرئيسية"><span class="logo">Ω</span><span dir="ltr">omni<span class="dim">nexus</span><small>مساحة العمل</small></span></a>
+  <button class="new-chat" id="newChat"><span>＋</span> محادثة جديدة</button>
+  <p class="nav-label">المشروع</p>
+  <nav aria-label="التنقل الرئيسي"><button class="nav-item active" data-view="chat" aria-current="page"><span>◫</span> المحادثة</button><button class="nav-item" data-view="files"><span>▤</span> ملفات المشروع <b id="fileCount">…</b></button><a class="nav-item" href="https://github.com/k98852665-debug/omninexus" target="_blank" rel="noopener"><span>↗</span> المصدر على GitHub</a></nav>
+  <div class="sidebar-bottom"><div class="version"><span class="mini-logo">Ω</span><div><strong>OMNI NEXUS</strong><small>الإصدار 11 · نسخة تجريبية</small></div></div><p>ردود برمجية تجريبية.<br>لا يوجد نموذج ذكاء اصطناعي متصل.</p></div>
+</aside>
+<main>
+  <header><div class="breadcrumb">مساحة العمل <span>/</span> <strong id="pageLabel">المحادثة</strong></div><span class="connection" id="connection" role="status">جارٍ الاتصال</span></header>
+  <section id="chatView" class="chat-view" aria-label="المحادثة">
+    <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions text">
+      <div class="welcome" id="welcome"><span class="eyebrow">OMNI NEXUS / V11</span><h1>فكرة جديدة.<br><span>مساحة لكل أسئلتك.</span></h1><p>جرّب المحادثة بالعربية أو الإنجليزية،<br>واستكشف المشروع من مكان واحد.</p><div class="suggestions"><button data-prompt="اشرح لي أساسيات الذكاء الاصطناعي"><span>✧</span><strong>استكشف فكرة</strong><small>أساسيات الذكاء الاصطناعي</small><i>↖</i></button><button data-prompt="كيف أقسم مشروعي إلى خطوات؟"><span>⌘</span><strong>رتّب مشروعك</strong><small>من الفكرة إلى خطوات</small><i>↖</i></button></div></div>
+    </div>
+    <div class="composer-wrap"><form id="chatForm" class="composer"><label class="sr-only" for="question">اكتب رسالتك</label><textarea id="question" rows="2" maxlength="4000" placeholder="اكتب سؤالك، وخلّينا نبدأ…" required dir="auto"></textarea><div class="composer-bottom"><span>العربية / English <span class="separator">·</span> <span class="demo-label">وضع تجريبي</span></span><button id="send" type="submit" aria-label="إرسال الرسالة">↑</button></div></form><p class="composer-note">الردود ناتجة عن منطق تجريبي في المشروع، وقد لا تجيب عن سؤالك بدقة.</p></div>
+  </section>
+  <section id="filesView" class="files-view" hidden><span class="eyebrow">SOURCE / PROJECT</span><div class="files-heading"><div><h1>كل ملفات المشروع.</h1><p>الملفات الأصلية والتحديثات الجاهزة للتشغيل.</p></div><a class="download" href="/project/download">تنزيل المشروع ZIP <span>↓</span></a></div><div class="file-table"><div class="table-head"><span>الملف</span><span>الحجم</span><span>تنزيل</span></div><div id="fileList" aria-live="polite">جارٍ تحميل الملفات…</div></div><p class="files-footnote">نسخة العمل مبنية على مستودع k98852665-debug/omninexus.</p></section>
+  <footer><span dir="ltr">OMNI<span class="accent">Ω</span>NEXUS</span><span>مساحة بسيطة. أفكار أوسع.</span></footer>
+</main>
+</body></html>

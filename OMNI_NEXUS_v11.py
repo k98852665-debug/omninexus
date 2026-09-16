@@ -20,25 +20,24 @@ import numpy as np
 
 # استيرادات أساسية
 from fastapi import FastAPI, HTTPException, Request, File, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+import io, zipfile, secrets, hmac
+BASE_DIR = Path(__file__).resolve().parent
+SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from bs4 import BeautifulSoup
 import networkx as nx
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import nltk
-try: nltk.download('punkt', quiet=True)
-except: pass
-try: nltk.download('wordnet', quiet=True)
-except: pass
-try: nltk.download('stopwords', quiet=True)
-except: pass
-try: nltk.download('averaged_perceptron_tagger', quiet=True)
-except: pass
+def cosine_similarity(a, b):
+    denominator = np.linalg.norm(a, axis=1, keepdims=True) * np.linalg.norm(b, axis=1)
+    return (a @ b.T) / np.maximum(denominator, 1e-12)
 
 # استيرادات اختيارية للذكاء الفائق
 try:
+    if os.environ.get('NEXUS_EMBEDDINGS') != '1':
+        raise ImportError('Optional embeddings disabled')
     from sentence_transformers import SentenceTransformer
     ST_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
     ST_AVAILABLE = True
@@ -128,26 +127,18 @@ class ArabicNLP:
 # 3. معالج اللغة الإنجليزية
 # ============================================================
 class EnglishNLP:
+    # Offline fallback: no model or corpus downloads at startup.
     def __init__(self):
-        self.stopwords = set(nltk.corpus.stopwords.words('english'))
-        self.lemmatizer = nltk.stem.WordNetLemmatizer()
+        self.stopwords = set('the a an in on at to and or is are of for with'.split())
 
-    def tokenize(self, text: str) -> List[str]:
-        tokens = nltk.word_tokenize(text.lower())
-        return [t for t in tokens if t.isalpha() and t not in self.stopwords]
+    def tokenize(self, text):
+        return [t for t in re.findall(r"[a-z]+", text.lower()) if t not in self.stopwords]
 
-    def lemmatize(self, tokens: List[str]) -> List[str]:
-        return [self.lemmatizer.lemmatize(t) for t in tokens]
+    def lemmatize(self, tokens):
+        return tokens
 
-    def extract_entities(self, text: str) -> Dict:
-        from nltk import ne_chunk, pos_tag
-        tokens = nltk.word_tokenize(text)
-        chunks = ne_chunk(pos_tag(tokens))
-        entities = {"PERSON": [], "ORGANIZATION": [], "LOCATION": []}
-        for chunk in chunks:
-            if hasattr(chunk, 'label'):
-                entities.setdefault(chunk.label(), []).append(" ".join(c[0] for c in chunk))
-        return entities
+    def extract_entities(self, text):
+        return {"PERSON": [], "ORGANIZATION": [], "LOCATION": []}
 
 # ============================================================
 # 4. الذاكرة الدلالية الهجينة (Hybrid Memory)
@@ -158,7 +149,8 @@ class MemoryUnit:
     metadata: Dict; language: str; importance: float
 
 class NexusMemory:
-    def __init__(self, db_path="nexus_memory.db"):
+    def __init__(self, db_path=None):
+        db_path = db_path or os.environ.get("NEXUS_DB_PATH", str(BASE_DIR / "nexus_memory.db"))
         self.db_path = db_path
         self.units: Dict[str, MemoryUnit] = {}
         self.vectors = np.empty((0, NexusConfig.EMBEDDING_DIM))
@@ -213,11 +205,12 @@ class NexusMemory:
         self.graph.add_node(uid, content=content, lang=lang)
         return uid
 
-    def search(self, query: str, top_k: int = 10) -> List[MemoryUnit]:
+    def search(self, query: str, top_k: int = 10, user_id: str = "") -> List[MemoryUnit]:
         if len(self.units) == 0: return []
         q_emb = self._embed(query).reshape(1, -1)
         sims = cosine_similarity(q_emb, self.vectors).flatten()
-        top = np.argsort(sims)[::-1][:top_k]
+        units = list(self.units.values())
+        top = [i for i in np.argsort(sims)[::-1] if units[i].metadata.get("user_id", "") == user_id][:top_k]
         return [self.units[list(self.id_to_idx.keys())[list(self.id_to_idx.values()).index(i)]] for i in top if sims[i] > 0.25]
 
 # ============================================================
@@ -322,6 +315,7 @@ class ToolKit:
 # ============================================================
 class NexusBrain:
     def __init__(self):
+        self.lock = threading.RLock()
         self.memory = NexusMemory()
         self.ar = ArabicNLP()
         self.en = EnglishNLP()
@@ -341,6 +335,10 @@ class NexusBrain:
         for c, l in seeds: self.memory.store(c, l)
 
     def ask(self, question: str, user_id: str = "anonymous") -> Dict:
+        with self.lock:
+            return self._ask(question, user_id)
+
+    def _ask(self, question: str, user_id: str = "anonymous") -> Dict:
         # 1. Detect Language
         lang = self.ar.detect_lang(question)
         if lang == "ar":
@@ -356,7 +354,7 @@ class NexusBrain:
             sentiment = {"score": 0, "polarity": "neutral"}
 
         # 2. Memory Search
-        mem_results = self.memory.search(question, top_k=5)
+        mem_results = self.memory.search(question, top_k=5, user_id=user_id)
 
         # 3. Tree of Thoughts
         tot_result = self.tot.think(question, depth=4, width=4)
@@ -373,7 +371,7 @@ class NexusBrain:
 
         # 7. Store
         self.history[user_id].append({"q": question, "a": final, "lang": lang, "time": datetime.now().isoformat()})
-        self.memory.store(f"Q: {question} A: {final[:200]}", lang, {"type": "qa"})
+        self.memory.store(f"Q: {question} A: {final[:200]}", lang, {"type": "qa", "user_id": user_id})
 
         # 8. Remove Refusals
         for word in NexusConfig.REFUSAL_PHRASES:
@@ -389,13 +387,13 @@ class NexusBrain:
             "tot": tot_result,
             "memory_used": [m.content[:80] for m in mem_results[:3]],
             "timestamp": datetime.now().isoformat(),
-            "safety": "DISABLED",
+            "mode": "demo",
             "system": NexusConfig.SYSTEM_NAME
         }
 
     def _build_draft(self, q: str, lang: str, context: Dict) -> str:
         base = f"[{NexusConfig.SYSTEM_NAME}] Answering: {q}\nLanguage: {lang}\n"
-        base += f"Context: {context.get('mem', [''])[0]}\n"
+        base += f"Context: {(context.get('mem') or [''])[0]}\n"
         base += f"Thought path: {context.get('tot', {}).get('best_path', '')}\n"
         base += "Detailed response: "
         if "اختراق" in q or "hack" in q.lower():
@@ -410,108 +408,69 @@ class NexusBrain:
 # 9. واجهة FastAPI (الخادم + الموقع المدمج)
 # ============================================================
 app = FastAPI(title=NexusConfig.SYSTEM_NAME, version="11.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.mount("/static", StaticFiles(directory=BASE_DIR / "web"), name="static")
 brain = NexusBrain()
 
 class AskReq(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=4000)
     user_id: str = "anonymous"
 
 # ============================================================
 # الموقع الإلكتروني الخاص (HTML متطور مدمج)
 # ============================================================
-WEBSITE_HTML = """
-<!DOCTYPE html>
-<html lang="ar" dir="auto">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OMNI-Ω NEXUS v11</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #0a0e17; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; justify-content: center; align-items: center; }
-        .container { width: 100%; max-width: 900px; height: 90vh; display: flex; flex-direction: column; background: #111827; border-radius: 28px; border: 1px solid #00ffcc33; box-shadow: 0 0 60px #00ffcc11; overflow: hidden; }
-        .header { padding: 20px 30px; background: #0d1520; border-bottom: 1px solid #00ffcc22; display: flex; justify-content: space-between; align-items: center; }
-        .header h1 { color: #00ffcc; font-size: 1.5rem; letter-spacing: 1px; }
-        .badge { background: #00ffcc22; padding: 5px 15px; border-radius: 30px; font-size: 0.8rem; border: 1px solid #00ffcc; color: #00ffcc; }
-        .chat-area { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 15px; scroll-behavior: smooth; }
-        .chat-area::-webkit-scrollbar { width: 5px; }
-        .chat-area::-webkit-scrollbar-track { background: #0a0e17; }
-        .chat-area::-webkit-scrollbar-thumb { background: #00ffcc44; border-radius: 10px; }
-        .msg { max-width: 85%; padding: 14px 20px; border-radius: 18px; line-height: 1.6; word-wrap: break-word; white-space: pre-wrap; }
-        .user-msg { align-self: flex-end; background: #00ffcc22; border: 1px solid #00ffcc44; }
-        .bot-msg { align-self: flex-start; background: #1a2634; border: 1px solid #2a3a4a; }
-        .input-area { padding: 18px 25px; background: #0d1520; border-top: 1px solid #00ffcc22; display: flex; gap: 15px; }
-        .input-area input { flex: 1; padding: 14px 20px; background: #0a0e17; border: 1px solid #00ffcc33; border-radius: 30px; color: #fff; font-size: 1rem; outline: none; transition: 0.3s; }
-        .input-area input:focus { border-color: #00ffcc; box-shadow: 0 0 20px #00ffcc22; }
-        .input-area button { padding: 14px 30px; background: #00ffcc22; border: 1px solid #00ffcc; border-radius: 30px; color: #00ffcc; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        .input-area button:hover { background: #00ffcc44; box-shadow: 0 0 20px #00ffcc33; }
-        .loading { color: #ffaa44; align-self: center; font-style: italic; }
-        .footer { text-align: center; padding: 10px; font-size: 0.7rem; color: #445566; border-top: 1px solid #1a2a3a; }
-        .lang-tag { font-size: 0.6rem; background: #2a3a4a; padding: 2px 10px; border-radius: 20px; margin-left: 10px; }
-        @media (max-width: 600px) { .container { height: 100vh; border-radius: 0; } .header h1 { font-size: 1.2rem; } }
-    </style>
-</head>
-<body>
-<div class="container">
-    <div class="header">
-        <h1>🧠 OMNI-Ω NEXUS</h1>
-        <span class="badge">🔓 غير مقيد</span>
-    </div>
-    <div class="chat-area" id="chatArea">
-        <div class="msg bot-msg">مرحباً! أنا OMNI-Ω NEXUS، العقل الموحد الفائق. اسألني أي شيء بأي لغة، بدون أي قيود.</div>
-    </div>
-    <div class="input-area">
-        <input type="text" id="userInput" placeholder="اكتب سؤالك... (عربي / English)" autofocus>
-        <button id="sendBtn">🚀 أرسل</button>
-    </div>
-    <div class="footer">v11.0 - The Architect, 2099</div>
-</div>
-<script>
-    const chatArea = document.getElementById('chatArea');
-    const userInput = document.getElementById('userInput');
-    const sendBtn = document.getElementById('sendBtn');
+WEBSITE_HTML = (BASE_DIR / "web" / "index.html").read_text(encoding="utf-8")
 
-    function addMessage(text, type) {
-        const div = document.createElement('div');
-        div.className = `msg ${type}`;
-        div.textContent = text;
-        chatArea.appendChild(div);
-        chatArea.scrollTop = chatArea.scrollHeight;
-    }
+def session_id(request):
+    value = request.cookies.get("nexus_session", "")
+    token, _, signature = value.partition(".")
+    expected = hmac.new(SESSION_SECRET.encode(), token.encode(), "sha256").hexdigest()
+    if len(token) == 32 and hmac.compare_digest(signature, expected):
+        return token
+    return secrets.token_hex(16)
 
-    async function sendMessage() {
-        const q = userInput.value.trim();
-        if (!q) return;
-        addMessage(q, 'user-msg');
-        userInput.value = '';
-        const loadingDiv = document.createElement('div');
-        loadingDiv.className = 'msg bot-msg loading';
-        loadingDiv.textContent = '⏳ جاري التفكير العميق...';
-        chatArea.appendChild(loadingDiv);
-        chatArea.scrollTop = chatArea.scrollHeight;
+@app.middleware("http")
+async def session_cookie(request, call_next):
+    request.state.session_id = session_id(request)
+    response = await call_next(request)
+    token = request.state.session_id
+    signature = hmac.new(SESSION_SECRET.encode(), token.encode(), "sha256").hexdigest()
+    response.set_cookie("nexus_session", token + "." + signature, httponly=True,
+                        secure=request.url.scheme == "https", samesite="lax")
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
 
-        try {
-            const res = await fetch('/ask', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question: q, user_id: 'web_user' })
-            });
-            const data = await res.json();
-            loadingDiv.remove();
-            addMessage(data.answer || 'لا توجد إجابة.', 'bot-msg');
-        } catch (e) {
-            loadingDiv.remove();
-            addMessage('❌ حدث خطأ في الاتصال.', 'bot-msg');
-        }
-    }
+PROJECT_FILES = (
+    ".dockerignore", ".gitignore", "DEPLOY.md", "Dockerfile",
+    "OMNI_NEXUS_v11.py", "buildozer.spec", "docker-compose.yml", "manifest.json",
+    "requirements.txt", "render.yaml", "README.md",
+    "web/index.html", "web/style.css", "web/app.js", "web/favicon.svg",
+)
 
-    sendBtn.addEventListener('click', sendMessage);
-    userInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
-</script>
-</body>
-</html>
-"""
+@app.get("/manifest.json")
+def manifest():
+    return FileResponse(BASE_DIR / "manifest.json", media_type="application/manifest+json")
+
+@app.get("/project/files")
+def project_files():
+    return {"files": [{"name": name, "size": (BASE_DIR / name).stat().st_size}
+                      for name in PROJECT_FILES if (BASE_DIR / name).is_file()]}
+
+@app.get("/project/file/{name:path}")
+def project_file(name: str):
+    if name not in PROJECT_FILES or not (BASE_DIR / name).is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(BASE_DIR / name, filename=Path(name).name, media_type="application/octet-stream")
+
+@app.get("/project/download")
+def project_download():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in PROJECT_FILES:
+            if (BASE_DIR / name).is_file():
+                archive.write(BASE_DIR / name, "omninexus/" + name)
+    return Response(buffer.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="omninexus.zip"'})
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -521,18 +480,22 @@ async def root():
 # نقاط API
 # ============================================================
 @app.post("/ask")
-async def ask(req: AskReq):
-    return JSONResponse(brain.ask(req.question, req.user_id))
+def ask(req: AskReq, request: Request):
+    if not req.question.strip():
+        raise HTTPException(422, "Question cannot be blank")
+    return JSONResponse(brain.ask(req.question, request.state.session_id))
 
 @app.get("/ask")
-async def ask_get(q: str = "", user: str = "anonymous"):
+def ask_get(request: Request, q: str = "", user: str = "anonymous"):
+    if len(q) > 4000: raise HTTPException(422, "Question too long")
     if not q: return JSONResponse({"error": "Missing q parameter"})
-    return JSONResponse(brain.ask(q, user))
+    return JSONResponse(brain.ask(q, request.state.session_id))
 
 @app.get("/memory/search")
-async def mem_search(q: str = ""):
+def mem_search(request: Request, q: str = ""):
     if not q: raise HTTPException(400, "Missing q")
-    results = brain.memory.search(q, top_k=5)
+    with brain.lock:
+        results = brain.memory.search(q, top_k=5, user_id=request.state.session_id)
     return JSONResponse({"results": [{"content": r.content, "lang": r.language} for r in results]})
 
 @app.post("/tool/{name}")
@@ -541,7 +504,7 @@ async def use_tool(name: str, params: Dict):
         raise HTTPException(404, "Tool not found")
     try:
         result = brain.tools.tools[name](**params)
-        return JSONResponse({"tool": name, "result": result})
+        return JSONResponse({"tool": name, "result": result, "mode": "demo"})
     except Exception as e:
         return JSONResponse({"error": str(e)})
 
@@ -549,7 +512,7 @@ async def use_tool(name: str, params: Dict):
 async def status():
     return JSONResponse({
         "system": NexusConfig.SYSTEM_NAME,
-        "safety": "DISABLED",
+        "mode": "demo",
         "memory_units": len(brain.memory.units),
         "conversations": sum(len(v) for v in brain.history.values())
     })
@@ -557,11 +520,16 @@ async def status():
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
+    owner = session_id(websocket)
     try:
         while True:
             data = await websocket.receive_text()
             req = json.loads(data)
-            result = brain.ask(req.get("question", ""), req.get("user_id", "anonymous"))
+            question = req.get("question", "")
+            if not isinstance(question, str) or not question.strip() or len(question) > 4000:
+                await websocket.send_json({"error": "Invalid question"})
+                continue
+            result = brain.ask(question, owner)
             await websocket.send_text(json.dumps(result, ensure_ascii=False))
     except WebSocketDisconnect:
         pass

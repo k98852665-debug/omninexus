@@ -1,1 +1,8 @@
-FROM scratch
+.git
+.venv
+__pycache__
+*.pyc
+*.db
+*.sqlite
+.env
+*.log

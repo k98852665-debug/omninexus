@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: omninexus
+    runtime: docker
+    plan: free
+    healthCheckPath: /status
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: NEXUS_EMBEDDINGS
+        value: "0"
