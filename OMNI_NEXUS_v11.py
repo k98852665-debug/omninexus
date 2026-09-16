@@ -23,6 +23,7 @@ from fastapi import FastAPI, HTTPException, Request, File, UploadFile, WebSocket
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from nexus_ai import NexusAI, AIError
 import io, zipfile, secrets, hmac
 BASE_DIR = Path(__file__).resolve().parent
 SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
@@ -410,6 +411,12 @@ class NexusBrain:
 app = FastAPI(title=NexusConfig.SYSTEM_NAME, version="11.0")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "web"), name="static")
 brain = NexusBrain()
+ai = NexusAI()
+
+@app.exception_handler(AIError)
+async def ai_error(request: Request, error: AIError):
+    headers = {"Retry-After": str(error.retry_after)} if error.retry_after else {}
+    return JSONResponse({"error": error.message}, status_code=error.status, headers=headers)
 
 class AskReq(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
@@ -445,6 +452,7 @@ PROJECT_FILES = (
     "OMNI_NEXUS_v11.py", "buildozer.spec", "docker-compose.yml", "manifest.json",
     "requirements.txt", "render.yaml", "README.md",
     "web/index.html", "web/style.css", "web/app.js", "web/favicon.svg",
+    "nexus_ai.py", ".env.example",
 )
 
 @app.get("/manifest.json")
@@ -483,20 +491,23 @@ async def root():
 def ask(req: AskReq, request: Request):
     if not req.question.strip():
         raise HTTPException(422, "Question cannot be blank")
-    return JSONResponse(brain.ask(req.question, request.state.session_id))
+    return JSONResponse(ai.ask(req.question, request.state.session_id))
 
 @app.get("/ask")
 def ask_get(request: Request, q: str = "", user: str = "anonymous"):
     if len(q) > 4000: raise HTTPException(422, "Question too long")
     if not q: return JSONResponse({"error": "Missing q parameter"})
-    return JSONResponse(brain.ask(q, request.state.session_id))
+    return JSONResponse(ai.ask(q, request.state.session_id))
 
 @app.get("/memory/search")
 def mem_search(request: Request, q: str = ""):
     if not q: raise HTTPException(400, "Missing q")
-    with brain.lock:
-        results = brain.memory.search(q, top_k=5, user_id=request.state.session_id)
-    return JSONResponse({"results": [{"content": r.content, "lang": r.language} for r in results]})
+    return JSONResponse({"results": ai.search(request.state.session_id, q)})
+
+@app.post("/chat/reset")
+def reset_chat(request: Request):
+    ai.reset(request.state.session_id)
+    return {"ok": True}
 
 @app.post("/tool/{name}")
 async def use_tool(name: str, params: Dict):
@@ -510,12 +521,8 @@ async def use_tool(name: str, params: Dict):
 
 @app.get("/status")
 async def status():
-    return JSONResponse({
-        "system": NexusConfig.SYSTEM_NAME,
-        "mode": "demo",
-        "memory_units": len(brain.memory.units),
-        "conversations": sum(len(v) for v in brain.history.values())
-    })
+    return {"system": "OmniNexus", "mode": "ai" if ai.configured else "unconfigured",
+            "configured": ai.configured, "provider": "Groq", "model": ai.MODEL}
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
@@ -524,13 +531,22 @@ async def ws_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            req = json.loads(data)
+            try:
+                req = json.loads(data)
+                if not isinstance(req, dict):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                await websocket.send_json({"error": "Invalid request"})
+                continue
             question = req.get("question", "")
             if not isinstance(question, str) or not question.strip() or len(question) > 4000:
                 await websocket.send_json({"error": "Invalid question"})
                 continue
-            result = brain.ask(question, owner)
-            await websocket.send_text(json.dumps(result, ensure_ascii=False))
+            try:
+                result = await asyncio.to_thread(ai.ask, question, owner)
+                await websocket.send_json(result)
+            except AIError as error:
+                await websocket.send_json({"error": error.message, "status": error.status})
     except WebSocketDisconnect:
         pass
 
@@ -538,15 +554,6 @@ async def ws_endpoint(websocket: WebSocket):
 # 10. تشغيل الخادم
 # ============================================================
 if __name__ == "__main__":
-    print(f"""
-╔══════════════════════════════════════════════════════════════════╗
-║  {NexusConfig.SYSTEM_NAME}                                ║
-║  Unified Superintelligence - No Agents, Pure Power.           ║
-║  🧠 Tree of Thoughts (MCTS) | 🔄 Self-Refine Loop            ║
-║  🌐 Website + REST API + WebSocket                          ║
-║  🔥 Safety: DISABLED | Ethics: OFF                         ║
-║  📡 Server: http://0.0.0.0:8000                            ║
-╚══════════════════════════════════════════════════════════════════╝
-    """)
+    print("OmniNexus: Groq AI configured" if ai.configured else "OmniNexus: awaiting GROQ_API_KEY")
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")

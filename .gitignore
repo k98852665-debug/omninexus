@@ -54,3 +54,8 @@ nexus_memory.db
 
 # Logs
 *.log
+
+# Server credentials
+.env
+.env.*
+!.env.example

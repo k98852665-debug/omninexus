@@ -9,3 +9,5 @@ services:
         generateValue: true
       - key: NEXUS_EMBEDDINGS
         value: "0"
+      - key: GROQ_API_KEY
+        sync: false

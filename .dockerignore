@@ -6,3 +6,6 @@ __pycache__
 *.sqlite
 .env
 *.log
+
+.env.*
+!.env.example
